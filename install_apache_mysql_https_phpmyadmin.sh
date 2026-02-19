@@ -319,19 +319,29 @@ execute_silent "Rechargement d'Apache" systemctl reload apache2
 # Étape 13: Obtention du certificat SSL
 CURRENT_STEP=$((CURRENT_STEP + 1))
 show_progress $CURRENT_STEP $TOTAL_STEPS "Obtention du certificat SSL"
-print_step "Désactivation temporaire du pare-feu..."
-/usr/sbin/ufw disable >> "$LOG_FILE" 2>&1
+
+# Vérifier si UFW est installé
+UFW_INSTALLED=false
+if command -v ufw &> /dev/null; then
+    UFW_INSTALLED=true
+    print_step "Désactivation temporaire du pare-feu UFW..."
+    /usr/sbin/ufw disable >> "$LOG_FILE" 2>&1
+fi
 
 print_step "Demande du certificat Let's Encrypt..."
 if certbot certonly --webroot -w "$site_dir" -d "$domain" --email "$certbot_email" --agree-tos --non-interactive >> "$LOG_FILE" 2>&1; then
     print_success "Certificat SSL obtenu avec succès"
 else
     print_error "Erreur lors de l'obtention du certificat SSL"
-    /usr/sbin/ufw enable >> "$LOG_FILE" 2>&1
+    if [ "$UFW_INSTALLED" = true ]; then
+        /usr/sbin/ufw enable >> "$LOG_FILE" 2>&1
+    fi
     exit 1
 fi
 
-execute_silent "Réactivation du pare-feu" /usr/sbin/ufw enable
+if [ "$UFW_INSTALLED" = true ]; then
+    execute_silent "Réactivation du pare-feu UFW" /usr/sbin/ufw enable
+fi
 
 # Étape 14: Configuration VirtualHost HTTPS final
 CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -380,12 +390,20 @@ execute_silent "Création du répertoire de scripts" mkdir -p /usr/local/lamp_in
 
 cat > "/usr/local/lamp_install/certauto_$domain.sh" <<'EOF'
 #!/bin/bash
-/usr/sbin/ufw disable
+
+# Vérifier si UFW est installé
+if command -v ufw &> /dev/null; then
+    /usr/sbin/ufw disable
+fi
 
 # renew certificat
 certbot certonly --standalone -d $domaine --force-renewal
 
-/usr/sbin/ufw enable
+# Réactiver UFW si installé
+if command -v ufw &> /dev/null; then
+    /usr/sbin/ufw enable
+fi
+
 systemctl reload apache2
 EOF
 
@@ -397,63 +415,68 @@ execute_silent "Configuration des permissions du script" chmod +x "/usr/local/la
 
 print_section "🛡️  CONFIGURATION DU PARE-FEU UFW (OPTIONNEL)"
 
-print_question "Voulez-vous configurer le pare-feu UFW ? (o/n) [n]:"
-read configure_ufw
-configure_ufw=${configure_ufw:-n}
-
-if [[ "$configure_ufw" =~ ^[oO]$ ]]; then
-    print_step "Configuration du pare-feu UFW..."
-    
-    # Demander si l'utilisateur veut ajouter des IPs autorisées
-    print_question "Voulez-vous autoriser des adresses IP spécifiques ? (o/n) [o]:"
-    read add_ips
-    add_ips=${add_ips:-o}
-    
-    if [[ "$add_ips" =~ ^[oO]$ ]]; then
-        echo ""
-        print_step "Ajout d'adresses IP autorisées"
-        echo -e "${YELLOW}Entrez les adresses IP à autoriser (une par ligne).${NC}"
-        echo -e "${YELLOW}Format: IP COMMENTAIRE (ex: 192.168.1.100 Mon serveur)${NC}"
-        echo -e "${YELLOW}Appuyez sur Entrée avec une ligne vide pour terminer.${NC}"
-        echo ""
-        
-        while true; do
-            read -p "IP et commentaire (ou Entrée pour terminer): " ip_entry
-            
-            if [ -z "$ip_entry" ]; then
-                break
-            fi
-            
-            # Extraire l'IP et le commentaire
-            ip_addr=$(echo "$ip_entry" | awk '{print $1}')
-            ip_comment=$(echo "$ip_entry" | cut -d' ' -f2-)
-            
-            if [ -z "$ip_comment" ]; then
-                ip_comment="Authorized IP"
-            fi
-            
-            # Valider l'IP (basique)
-            if [[ $ip_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                if /usr/sbin/ufw allow from "$ip_addr" comment "$ip_comment" >> "$LOG_FILE" 2>&1; then
-                    print_success "IP $ip_addr autorisée ($ip_comment)"
-                else
-                    print_error "Erreur lors de l'ajout de l'IP $ip_addr"
-                fi
-            else
-                print_warning "Format d'IP invalide: $ip_addr"
-            fi
-        done
-    fi
-    
-    # Configuration de la politique par défaut
-    print_step "Configuration de la politique par défaut..."
-    /usr/sbin/ufw default deny incoming >> "$LOG_FILE" 2>&1
-    /usr/sbin/ufw default allow outgoing >> "$LOG_FILE" 2>&1
-    print_success "Politique par défaut configurée (deny incoming, allow outgoing)"
-    
-    print_success "Pare-feu UFW configuré avec succès"
+# Vérifier si UFW est installé
+if ! command -v ufw &> /dev/null; then
+    print_warning "UFW n'est pas installé sur ce système. Configuration du pare-feu ignorée."
 else
-    print_warning "Configuration du pare-feu UFW ignorée"
+    print_question "Voulez-vous configurer le pare-feu UFW ? (o/n) [n]:"
+    read configure_ufw
+    configure_ufw=${configure_ufw:-n}
+
+    if [[ "$configure_ufw" =~ ^[oO]$ ]]; then
+        print_step "Configuration du pare-feu UFW..."
+        
+        # Demander si l'utilisateur veut ajouter des IPs autorisées
+        print_question "Voulez-vous autoriser des adresses IP spécifiques ? (o/n) [o]:"
+        read add_ips
+        add_ips=${add_ips:-o}
+        
+        if [[ "$add_ips" =~ ^[oO]$ ]]; then
+            echo ""
+            print_step "Ajout d'adresses IP autorisées"
+            echo -e "${YELLOW}Entrez les adresses IP à autoriser (une par ligne).${NC}"
+            echo -e "${YELLOW}Format: IP COMMENTAIRE (ex: 192.168.1.100 Mon serveur)${NC}"
+            echo -e "${YELLOW}Appuyez sur Entrée avec une ligne vide pour terminer.${NC}"
+            echo ""
+            
+            while true; do
+                read -p "IP et commentaire (ou Entrée pour terminer): " ip_entry
+                
+                if [ -z "$ip_entry" ]; then
+                    break
+                fi
+                
+                # Extraire l'IP et le commentaire
+                ip_addr=$(echo "$ip_entry" | awk '{print $1}')
+                ip_comment=$(echo "$ip_entry" | cut -d' ' -f2-)
+                
+                if [ -z "$ip_comment" ]; then
+                    ip_comment="Authorized IP"
+                fi
+                
+                # Valider l'IP (basique)
+                if [[ $ip_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    if /usr/sbin/ufw allow from "$ip_addr" comment "$ip_comment" >> "$LOG_FILE" 2>&1; then
+                        print_success "IP $ip_addr autorisée ($ip_comment)"
+                    else
+                        print_error "Erreur lors de l'ajout de l'IP $ip_addr"
+                    fi
+                else
+                    print_warning "Format d'IP invalide: $ip_addr"
+                fi
+            done
+        fi
+        
+        # Configuration de la politique par défaut
+        print_step "Configuration de la politique par défaut..."
+        /usr/sbin/ufw default deny incoming >> "$LOG_FILE" 2>&1
+        /usr/sbin/ufw default allow outgoing >> "$LOG_FILE" 2>&1
+        print_success "Politique par défaut configurée (deny incoming, allow outgoing)"
+        
+        print_success "Pare-feu UFW configuré avec succès"
+    else
+        print_warning "Configuration du pare-feu UFW ignorée"
+    fi
 fi
 
 # ============================================================================
